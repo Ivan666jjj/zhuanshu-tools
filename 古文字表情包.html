@@ -107,6 +107,14 @@
     width: 100%; padding: 9px 10px; font-family: inherit; font-size: 13.5px;
     color: #4f463a; background: #fffdf8; border: 1.5px solid #ddd7c9; border-radius: 8px; outline: none;
   }
+  .seg { display: flex; gap: 6px; margin: 0 0 10px 3px; }
+  .seg button {
+    flex: 1; padding: 9px 0; font-family: inherit; font-size: 14px; cursor: pointer;
+    color: #5d5346; background: #fffdf8; border: 1.5px solid #ddd7c9;
+    border-radius: 8px; transition: .15s;
+  }
+  .seg button:hover { border-color: #b9ad97; }
+  .seg button.on { color: #fff; background: #8a6f4a; border-color: #8a6f4a; }
   .swatches { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin: 0 0 14px; }
   .sw {
     width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
@@ -135,7 +143,7 @@
 <div class="panel">
   <div class="step">① 输入文字</div>
   <div class="field">
-    <input id="text" type="text" maxlength="4" value="吃瓜" autocomplete="off" spellcheck="false">
+    <input id="text" type="text" maxlength="8" value="吃瓜" autocomplete="off" spellcheck="false">
     <button id="go">生成</button>
   </div>
 
@@ -145,13 +153,15 @@
     <select id="fontsel" title="字形"></select>
   </div>
 
-  <div class="step">③ 选墨色</div>
+  <div class="step">③ 选排版</div>
+  <div class="seg" id="dirs"></div>
+  <div class="step">④ 选墨色</div>
   <div class="swatches" id="swatches"></div>
 
   <div class="tip" id="tip"></div>
   <canvas id="cv" width="900" height="900"></canvas>
 
-  <div class="step">④ 保存</div>
+  <div class="step">⑤ 保存</div>
   <div class="acts">
     <a id="save" download="表情包.png">保存图片</a>
     <button id="re">换一张</button>
@@ -233,35 +243,62 @@ function hexA(hex, a) {
   const n = parseInt(hex.slice(1), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
 }
-function getText() { return (document.getElementById('text').value || '吃瓜').trim().slice(0, 4); }
+function getText() { return (document.getElementById('text').value || '吃瓜').trim().slice(0, 8); }
 
-// ── 自适应字号 ──
-// 按「文字块占可用区的比例」算，不再按字数硬分档，1 字和 4 字视觉重量一致。
-const LINE_GAP = 1.14;
-function fitSize(n) {
-  const AW = W - 140, AH = H - 230;          // 可用区（扣掉圆角内边距与底部小字）
-  if (n <= 1) return Math.min(AW, AH) * 0.68;
-  if (n === 2) return Math.min(AH * 0.80, AW / (2 * LINE_GAP));
-  return Math.min(AW / (2 * LINE_GAP), AH * 0.82 / (2 * LINE_GAP));   // 两行两列
+// ── 排版：横排 / 竖排 / 随机，字多了自动分列（竖）或分行（横）──
+const LINE_GAP = 1.16;   // 字间距
+const AXIS_GAP = 1.30;   // 列间距 / 行间距
+const AW = W - 240, AH = H - 320;   // 可用区（扣掉圆角内边距与底部小字）
+const CY = H / 2 - 26;              // 视觉中心（略上移，给底部小字让位）
+
+let dirMode = 'h';       // 表情包默认横排
+function resolveDir() {
+  if (dirMode !== 'r') return dirMode;
+  return rng() < 0.5 ? 'v' : 'h';
 }
 
-// 把字排上去：1-2 字横排，3-4 字两行两列
-function eachGlyph(g, size, fn) {
+// 二分搜索能塞进可用区的最大字号
+function bestSize(n, dir) {
+  const along  = dir === 'v' ? AH : AW;
+  const across = dir === 'v' ? AW : AH;
+  let lo = 6, hi = Math.min(AW, AH);
+  for (let i = 0; i < 34; i++) {
+    const s = (lo + hi) / 2;
+    const per = Math.max(1, Math.floor(along / (s * LINE_GAP)));
+    const lines = Math.ceil(n / per);
+    if (lines * s * AXIS_GAP <= across + 0.5) lo = s; else hi = s;
+  }
+  return Math.max(6, lo);
+}
+
+function placeGlyphs(n, dir) {
+  const size = n <= 1 ? Math.min(AW, AH) * 0.62 : bestSize(n, dir);
+  const gap = size * LINE_GAP, axis = size * AXIS_GAP;
+  const along = dir === 'v' ? AH : AW;
+  const per = Math.max(1, Math.floor(along / gap));
+  const lines = Math.ceil(n / per);
+  const pos = [];
+  for (let i = 0; i < n; i++) {
+    const line = Math.floor(i / per), idx = i % per;
+    const cnt = Math.min(per, n - line * per);
+    if (dir === 'v') {
+      const x = W / 2 + (lines - 1) * axis / 2 - line * axis;
+      const y0 = CY - (cnt - 1) * gap / 2;
+      pos.push([x, y0 + idx * gap]);
+    } else {
+      const y = CY + (lines - 1) * axis / 2 - line * axis;
+      const x0 = W / 2 - (cnt - 1) * gap / 2;
+      pos.push([x0 + idx * gap, y]);
+    }
+  }
+  return { size, pos };
+}
+
+function eachGlyph(g, lay, fn) {
   const chars = Array.from(getText());
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.font = `${size}px ${fontCss}`;
-  const cx = W / 2, cy = H / 2 - 26;
-  if (chars.length <= 2) {
-    const gap = size * 1.14;
-    const x0 = cx - (chars.length - 1) * gap / 2;
-    chars.forEach((ch, i) => fn(g, ch, x0 + i * gap, cy));
-  } else {
-    const r = chars.slice(0, 2), c = chars.slice(2, 4);
-    const gap = size * 1.14;
-    const y0 = cy - gap / 2, y1 = cy + gap / 2;
-    r.forEach((ch, i) => fn(g, ch, cx - gap / 2 + i * gap, y0));
-    c.forEach((ch, i) => fn(g, ch, cx - gap / 2 + i * gap, y1));
-  }
+  g.font = `${lay.size}px ${fontCss}`;
+  chars.forEach((ch, i) => fn(g, ch, lay.pos[i][0], lay.pos[i][1]));
 }
 
 // ── 装饰 ──
@@ -358,16 +395,17 @@ function render() {
 
   // 主字（先描一圈白边，做出贴纸感）
   const chars = Array.from(getText());
-  const size = fitSize(chars.length);
+  const lay = placeGlyphs(chars.length, resolveDir());
+  const size = lay.size;
   ctx.shadowColor = hexA('#000000', .18);
   ctx.shadowBlur = 12; ctx.shadowOffsetY = 5;
   ctx.lineWidth = size * 0.075;
   ctx.lineJoin = 'round';
   ctx.strokeStyle = 'rgba(255,255,255,.92)';
-  eachGlyph(ctx, size, (g, ch, x, y) => g.strokeText(ch, x, y));
+  eachGlyph(ctx, lay, (g, ch, x, y) => g.strokeText(ch, x, y));
   ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
   ctx.fillStyle = inkColor;
-  eachGlyph(ctx, size, (g, ch, x, y) => g.fillText(ch, x, y));
+  eachGlyph(ctx, lay, (g, ch, x, y) => g.fillText(ch, x, y));
 
   // 底部小字（现代汉语，方便不认识古文字的人也能看懂）
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -450,6 +488,28 @@ const COLORS = [
   { name:'黛',   v:'#46525e' },
 ];
 let inkColor = COLORS[0].v;
+
+// 排版方式
+const DIRS = [
+  { id:'h', name:'横排' },
+  { id:'v', name:'竖排' },
+  { id:'r', name:'随机' },
+];
+// 排版选择
+const dirEl = document.getElementById('dirs');
+DIRS.forEach((d, i) => {
+  const b = document.createElement('button');
+  b.textContent = d.name;
+  b.className = i === 0 ? 'on' : '';
+  b.onclick = () => {
+    dirMode = d.id;
+    [...dirEl.children].forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    render();
+  };
+  dirEl.appendChild(b);
+});
+
 const swEl = document.getElementById('swatches');
 COLORS.forEach((c, i) => {
   const d = document.createElement('div');
