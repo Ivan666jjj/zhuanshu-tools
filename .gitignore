@@ -1,0 +1,11 @@
+# 开发用文件，不入库
+ShuowenSeal.ttf
+*.swift
+grid
+grid2
+zhuan-card
+*.command
+说明.md
+*.zip
+.DS_Store
+*_篆书.png
