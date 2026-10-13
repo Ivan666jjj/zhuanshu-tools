@@ -259,7 +259,7 @@ const MOODS = [
   { key: 'jing', zi: '静', ref: 'Marden',  bg: '#f7f5f0', ink: '#2d3b43', accent: '#8ba4ae', mood: '寂',
     note: '留白比字更响', draw: drawMarden },
   { key: 'lie',  zi: '烈', ref: '井上有一', bg: '#faf7f2', ink: '#161514', accent: '#b3271e', mood: '烈',
-    note: '一个字，砸下去', draw: drawInoue },
+    note: '一个字，砸下去', draw: drawInoue, sizeBoost: 1.36 },
   { key: 'yu',   zi: '郁', ref: 'Pollock', bg: '#1a1c21', ink: '#93a2b3', accent: '#cbb79b', mood: '郁',
     note: '笔迹就是情绪的轨迹', draw: drawPollock },
   { key: 'yi',   zi: '逸', ref: '东巴文',  bg: '#efe6d5', ink: '#57432e', accent: '#9a7038', mood: '逸',
@@ -310,7 +310,9 @@ function bestSize(n, dir) {
 
 // 算出每个字的位置。竖排从右往左、横排从上往下，末列/末行居中。
 function placeGlyphs(n, dir) {
-  const size = n <= 1 ? Math.min(AW, AH) * 0.50 : bestSize(n, dir);
+  // 个别心境可以自带放大系数（比如「烈」—— 井上有一本来就是巨幅）
+  const boost = (current && current.sizeBoost) || 1;
+  const size = (n <= 1 ? Math.min(AW, AH) * 0.50 : bestSize(n, dir)) * boost;
   const gap = size * LINE_GAP, axis = size * AXIS_GAP;
   const along = dir === 'v' ? AH : AW;
   const per = Math.max(1, Math.floor(along / gap));
@@ -367,6 +369,22 @@ function sampleMask(mask, want) {
   return out;
 }
 
+// 把字形掩膜「膨胀」一圈 —— 井上有一的墨会糊成块面，相邻笔画粘在一起，
+// 这跟单纯加粗不一样：它填的是笔画之间的缝。
+function dilateMask(src, r) {
+  const c = document.createElement('canvas');
+  c.width = src.width; c.height = src.height;
+  const g = c.getContext('2d');
+  const N = 18;
+  for (let i = 0; i < N; i++) {
+    const a = (i / N) * Math.PI * 2;
+    g.drawImage(src, Math.cos(a) * r, Math.sin(a) * r);
+  }
+  // 再补一圈内层，边缘不至于太毛
+  g.drawImage(src, 0, 0);
+  return c;
+}
+
 // 只取字形「边缘」的像素点 —— 飞白应该出在笔画的边上，不是把字内部掏空
 function edgePoints(mask, want) {
   const g = mask.getContext('2d', { willReadFrequently: true });
@@ -376,8 +394,13 @@ function edgePoints(mask, want) {
   for (let i = 0; i < want * 60 && out.length < want; i++) {
     const x = (rng() * W) | 0, y = (rng() * H) | 0;
     if (at(x, y) < 120) continue;                       // 不在字形里
-    if (at(x - 7, y) < 120 || at(x + 7, y) < 120 ||
-        at(x, y - 7) < 120 || at(x, y + 7) < 120) out.push([x, y]);   // 挨着空白 = 边缘
+    // 顺便算出「朝外」是哪一边 —— 飞白要顺着这个方向散出去，像笔锋的毛刺
+    let dx = 0, dy = 0;
+    if (at(x - 7, y) < 120) dx -= 1;
+    if (at(x + 7, y) < 120) dx += 1;
+    if (at(x, y - 7) < 120) dy -= 1;
+    if (at(x, y + 7) < 120) dy += 1;
+    if (dx || dy) out.push([x, y, dx, dy]);
   }
   return out;
 }
@@ -433,66 +456,103 @@ function drawMarden(g, cfg, mask) {
 // ══ 二 · 烈 · 墨象（井上有一）══════════════════════════════
 // 反复叠印出墨的浓淡，再用 destination-out 擦出飞白
 function drawInoue(g, cfg, mask) {
+  const chars = Array.from(text());
+  // 破格：整块字不一定居中，允许贴边（像他一幅只占一角）
+  const OFFX = rr(-W * 0.06, W * 0.06);
+  const OFFY = rr(-H * 0.04, H * 0.04);
+
   g.fillStyle = cfg.bg; g.fillRect(0, 0, W, H);
   paper(g, cfg, .7);
 
-  // 1) 墨会渗：先在外围铺一层湿边（放大一点 + 模糊）
-  g.save();
-  g.globalAlpha = .13;
-  if (CAN_FILTER) g.filter = 'blur(12px)';
-  g.fillStyle = cfg.ink;
-  g.translate(W / 2, H / 2); g.scale(1.035, 1.035); g.translate(-W / 2, -H / 2);
-  fillGlyph(g);
-  g.restore();
-
-  // 井上有一的字是纯墨，红色只出现在印章上，所以这里不再垫朱色层
-
-  // 3) 反复叠印。井上有一的墨是「实心黑」不是灰：
-  //    前面十几遍堆边缘的毛与浓淡，最后一遍用不透明压死。
-  for (let i = 0; i < 14; i++) {
+  const at = (fn) => {
     g.save();
-    g.globalAlpha = i === 13 ? 1 : rr(.14, .30);
+    g.translate(OFFX, OFFY);
+    fn();
+    g.restore();
+  };
+
+  // 1) 笔画粘连：把字形膨一圈，让相邻笔画糊成块面（他的墨是「砸」上去的）
+  const FAT = dilateMask(mask, Math.max(6, placeGlyphs(chars.length, 'v').size * 0.032));
+  at(() => {
+    g.save();
+    if (CAN_FILTER) g.filter = 'blur(4px)';     // 湿墨只晕一点点，晕多了就成灰雾
+    g.globalAlpha = .42;
     g.fillStyle = cfg.ink;
-    g.translate(rr(-10, 10), rr(-10, 10));
-    // 变形：轻微拉长或压扁，像他一笔下去的势（幅度别太大，否则两字不协调）
-    const sx = rr(.985, 1.022), sy = rr(.985, 1.022);
-    g.translate(W / 2, H / 2);
-    g.scale(sx, sy);
-    g.rotate(rr(-.014, .014));
-    g.translate(-W / 2, -H / 2);
+    g.drawImage(FAT, 0, 0);
+    g.restore();
+  });
+
+  // 2) 主墨：字形本体，但内部要有「一笔从湿到枯」的浓淡，
+  //    不是整字一个色。用渐变 + source-in 抠进字形里。
+  for (let i = 0; i < 13; i++) {
+    at(() => {
+      g.save();
+      g.globalAlpha = i >= 11 ? 1 : rr(.18, .34);
+      g.fillStyle = cfg.ink;
+      g.translate(rr(-8, 8), rr(-8, 8));
+      const sx = rr(.985, 1.02), sy = rr(.985, 1.02);
+      g.translate(W / 2, H / 2); g.scale(sx, sy); g.rotate(rr(-.012, .012)); g.translate(-W / 2, -H / 2);
+      fillGlyph(g);
+      g.restore();
+    });
+  }
+  // 渐变过一遍：上半湿、下半枯（他的竖笔基本都这样）
+  at(() => {
+    g.save();
+    const gr = g.createLinearGradient(0, H * 0.18, 0, H * 0.92);
+    gr.addColorStop(0, hex2rgba(cfg.bg, 0));       // 顶部不动
+    gr.addColorStop(.55, hex2rgba(cfg.bg, .05));
+    gr.addColorStop(1, hex2rgba(cfg.bg, .22));     // 底部微微擦淡（不能多，多了就灰）
+    g.fillStyle = gr;
     fillGlyph(g);
     g.restore();
-  }
+  });
 
-  // 4) 飞白：沿笔画方向扫出的枯笔（在字形像素上采样），不是满画布乱划
+  // 3) 飞白：只擦边缘，而且顺着笔画扫（不是满画布乱划）
   g.globalCompositeOperation = 'destination-out';
-  const edge = edgePoints(mask, 90);
-  for (const [x, y] of edge) {
-    g.strokeStyle = `rgba(0,0,0,${rr(.25, .62)})`;
-    g.lineWidth = rr(1.4, 4.5);
-    g.lineCap = 'round';
-    g.beginPath();
-    g.moveTo(x, y);
-    g.quadraticCurveTo(x + rr(-20, 20), y + rr(-7, 7), x + rr(-38, 38), y + rr(-14, 14));
-    g.stroke();
-  }
-  // 破锋的碎点（也要贴着边缘）
-  for (let i = 0; i < 34; i++) {
-    const q = edge[(rng() * edge.length) | 0];
-    if (!q) break;
-    g.fillStyle = `rgba(0,0,0,${rr(.25, .7)})`;
-    g.beginPath(); g.arc(q[0] + rr(-16, 16), q[1] + rr(-16, 16), rr(.8, 3.2), 0, 7); g.fill();
-  }
+  at(() => {
+    const edge = edgePoints(mask, 150);
+    for (const [x, y, dx, dy] of edge) {
+      // 朝「外面」那一边扫出去，像笔锋分叉的枯丝；不是压在字上画白线
+      const len = rr(6, 30);
+      const ux = dx * rr(.55, 1.1), uy = dy * rr(.55, 1.1);
+      g.strokeStyle = `rgba(0,0,0,${rr(.22, .68)})`;
+      g.lineWidth = rr(.9, 2.6);
+      g.lineCap = 'round';
+      g.beginPath();
+      g.moveTo(x, y);
+      g.quadraticCurveTo(x + ux * len * .6 + rr(-3, 3), y + uy * len * .6 + rr(-3, 3),
+                         x + ux * len + rr(-4, 4), y + uy * len + rr(-4, 4));
+      g.stroke();
+    }
+    // 飞出去的碎点，也朝外
+    for (let i = 0; i < 26; i++) {
+      const q = edge[(rng() * edge.length) | 0];
+      if (!q) break;
+      const l = rr(3, 22);
+      g.fillStyle = `rgba(0,0,0,${rr(.3, .75)})`;
+      g.beginPath(); g.arc(q[0] + q[2] * l + rr(-3, 3), q[1] + q[3] * l + rr(-3, 3), rr(.7, 2.8), 0, 7); g.fill();
+    }
+  });
   g.globalCompositeOperation = 'source-over';
 
-  // 朱印
+  // 4) 溅墨：他落笔时周围常有甩出去的点
+  at(() => {
+    for (let i = 0; i < 26; i++) {
+      const [x, y] = [rr(120, W - 120), rr(120, H - 200)];
+      g.fillStyle = hex2rgba(cfg.ink, rr(.15, .6));
+      g.beginPath(); g.arc(x, y, rr(1.5, 6), 0, 7); g.fill();
+    }
+  });
+
+  // 5) 朱印（他的作品几乎都有）
   g.save();
-  g.fillStyle = hex2rgba(cfg.accent, .88);
-  g.fillRect(W - 190, H - 210, 74, 74);
-  g.fillStyle = hex2rgba(cfg.bg, .82);
-  g.font = `44px ${KAI}`;
+  g.fillStyle = hex2rgba(cfg.accent, .9);
+  g.fillRect(W - 186, H - 206, 72, 72);
+  g.fillStyle = hex2rgba(cfg.bg, .85);
+  g.font = `42px ${KAI}`;
   g.textAlign = 'center'; g.textBaseline = 'middle';
-  g.fillText('印', W - 153, H - 172);
+  g.fillText('印', W - 150, H - 170);
   g.restore();
   sign(g, cfg, false);
 }
